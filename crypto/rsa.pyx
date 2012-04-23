@@ -12,36 +12,55 @@ cdef extern from "fileobject.h":
     cdef FILE* PyFile_AsFile(object)
 
 
-cdef class RSA_object(object):
-    cdef ossl_typ.RSA *_rsa
-    cdef int padding
-    cdef int dest_buf_size
-    cdef unsigned char* dest_buf
+ctypedef int (*RSACallback)(
+    int, unsigned char *, unsigned char * ,ossl_typ.RSA *, int
+)
 
-    property _error:
-        "get/clear internal errors"
-        def __get__(self):
-            result = err.ERR_peek_error()
-            return result
-        def __set__(self, value):
-            raise AttributeError('This property is not setable')
-        def __del__(self):
-            err.ERR_clear_error()
+
+#the real magic happens here
+cdef object _process(object source, RSACallback func, ossl_typ.RSA* key):
+    if not isinstance(source, str):
+        raise TypeError("only string data is supported")
+    dest = str()
+    cdef int read_len
+    cdef int i
+
+    cdef int dest_buf_size = rsa.RSA_size(key)
+    cdef unsigned char *dest_buf 
+    dest_buf = <unsigned char*>malloc( dest_buf_size )
+
+    if dest_buf is NULL:
+        raise MemoryError()
+
+    try:
+        while source:
+            read_len = min(len(source), dest_buf_size)
+            i = func(
+                read_len, source, dest_buf,
+                key, rsa.RSA_PKCS1_PADDING
+            )
+            if i == -1 or err.ERR_peek_error():
+                err.ERR_clear_error()
+                raise ValueError("Operation failed due to invalid input")
+            tmp = <bytes>dest_buf
+            dest += tmp[:i]
+            source = source[read_len:]
+
+        return dest
+    finally:
+        free( dest_buf )
+
+
+cdef class PublicKey:
+    cdef ossl_typ.RSA *_rsa
 
     def __cinit__(self):
         self._rsa = NULL
-        self.padding = rsa.RSA_PKCS1_PADDING
-        self.dest_buf = NULL
-        self.dest_buf_size = 0
 
     def __dealloc__(self):
         if self._rsa is not NULL:
             rsa.RSA_free(self._rsa)
-        if self.dest_buf is not NULL:
-            free(self.dest_buf)
 
-
-cdef class PublicKey(RSA_object):
     def __init__(self, path):
         """__init__(path)
 
@@ -57,15 +76,15 @@ cdef class PublicKey(RSA_object):
         evpk = pem.PEM_read_PUBKEY(fp, NULL, NULL, NULL)
         x.close() #make sure we close the file
 
-        if self._error != 0 or evpk is NULL:
-            del self._error
+        if err.ERR_peek_error() != 0 or evpk is NULL:
+            err.ERR_clear_error()
             if evpk is not NULL:
                 evp.EVP_PKEY_free(evpk)
             raise Exception("Failed to read RSA public key %s" % path)
 
         self._rsa = evp.EVP_PKEY_get1_RSA(evpk)
-        if self._error != 0 or self._rsa is NULL:
-            del self._error
+        if err.ERR_peek_error() != 0 or self._rsa is NULL:
+            err.ERR_clear_error()
             evp.EVP_PKEY_free(evpk)
             raise Exception("Failed to extract RSA key from the EVP_PKEY at %s" % path) 
 
@@ -74,63 +93,31 @@ cdef class PublicKey(RSA_object):
         #release the evp structure
         evp.EVP_PKEY_free(evpk)
 
-        #malloc can be slow so let's preallocate the buffer as soon as we can
-        self.dest_buf_size = rsa.RSA_size(self._rsa)
-        self.dest_buf = <unsigned char*>malloc( self.dest_buf_size )
-        if self.dest_buf is NULL: raise MemoryError()
-
-    cpdef encrypt(self, source) with gil: #protect the memory
+    def encrypt(self, source): #protect the memory
         """encrypt(source) -> string
 
            encrypt text with the rsa public key.
         """
-        if not isinstance(source, str):
-            raise TypeError("only string data is supported")
-        dest = str()
-        cdef int read_len
-        cdef int i
+        return _process(source, <RSACallback>rsa.RSA_public_encrypt, self._rsa)
 
-        while source:
-            read_len = min(len(source), self.dest_buf_size)
-            i = rsa.RSA_public_encrypt(
-                read_len, source, self.dest_buf,
-                self._rsa, self.padding
-            )
-            if i == -1 or self._error:
-                del self._error
-                raise ValueError("Operation failed due to invalid input")
-            tmp = <bytes>self.dest_buf
-            dest += tmp[:i]
-            source = source[read_len:]
-        return dest
-
-    cpdef decrypt(self, source) with gil: #protect the memory
+    def decrypt(self, source): #protect the memory
         """decrypt(source) -> string
 
            decrypt data with the rsa public key.
         """
-        if not isinstance(source, str):
-            raise TypeError("only string data is supported")
-        dest = str()
-        cdef int read_len
-        cdef int i
-
-        while source:
-            read_len = min(len(source), self.dest_buf_size)
-            i = rsa.RSA_public_decrypt(
-                read_len, source, self.dest_buf,
-                self._rsa, self.padding
-            )
-            if i == -1 or self._error:
-                del self._error
-                raise ValueError("Operation failed due to invalid input")
-            tmp = <bytes>self.dest_buf
-            dest += tmp[:i]
-            source = source[read_len:]
-        return dest
+        return _process(source, <RSACallback>rsa.RSA_public_decrypt, self._rsa)
 
 
-cdef class PrivateKey(RSA_object):
+cdef class PrivateKey:
+    cdef ossl_typ.RSA *_rsa
+
+    def __cinit__(self):
+        self._rsa = NULL
+
+    def __dealloc__(self):
+        if self._rsa is not NULL:
+            rsa.RSA_free(self._rsa)
+
     def __init__(self, path):
         """__init__(path)
 
@@ -146,64 +133,26 @@ cdef class PrivateKey(RSA_object):
         x.close() #make sure we close the file
 
         #check for library errors before null pointers
-        if self._error != 0:
-            del self._error
+        if err.ERR_peek_error() != 0:
+            err.ERR_clear_error()
             raise Exception("Failed to read RSA private key %s" % path)
 
         if self._rsa is NULL:
             raise MemoryError()
 
-        #malloc can be slow so let's preallocate the buffer as soon as we can
-        self.dest_buf_size = rsa.RSA_size(self._rsa)
-        self.dest_buf = <unsigned char*>malloc( self.dest_buf_size )
-        if self.dest_buf is NULL: raise MemoryError()
-
-    cpdef encrypt(self, source) with gil: #protect the memory
+    def encrypt(self, source):
         """encrypt(source) -> string
 
            encrypt text with the rsa private key.
         """
-        dest = str()
-        cdef int read_len
-        cdef int i
+        return _process(source, <RSACallback>rsa.RSA_private_encrypt, self._rsa)
 
-        while source:
-            read_len = min(len(source), self.dest_buf_size)
-            i = rsa.RSA_private_encrypt(
-                read_len, source, self.dest_buf,
-                self._rsa, self.padding
-            )
-            if i == -1 or self._error:
-                del self._error
-                raise ValueError("Operation failed due to invalid input")
-            tmp = <bytes>self.dest_buf
-            dest += tmp[:i]
-            source = source[read_len:]
-
-        return dest
-
-    cpdef decrypt(self, source) with gil: #protect the memory
+    def decrypt(self, source):
         """decrypt(source) -> string
 
            decrypt data with the rsa private key.
         """
-        dest = str()
-        cdef int read_len
-        cdef int i
+        return _process(source, <RSACallback>rsa.RSA_private_decrypt, self._rsa)
 
-        while source:
-            read_len = min(len(source), self.dest_buf_size)
-            i = rsa.RSA_private_decrypt(
-                read_len, source, self.dest_buf,
-                self._rsa, self.padding
-            )
-            if i == -1 or self._error:
-                del self._error
-                raise ValueError("Operation failed due to invalid input")
-            tmp = <bytes>self.dest_buf
-            dest += tmp[:i]
-            source = source[read_len:]
-
-        return dest
 
 __all__ = ['PrivateKey', 'PublicKey']
