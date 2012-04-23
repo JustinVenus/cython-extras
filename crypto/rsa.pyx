@@ -6,12 +6,15 @@ cimport evp
 cimport pem
 cimport err
 
-#Author: Justin Venus <justin.venus@gmail.com>
+__doc__ = """RSA Public/Private key encryption/decryption routines"""
+
+__author__ = "Justin Venus <justin.venus@gmail.com>"
 
 cdef extern from "fileobject.h": 
     cdef FILE* PyFile_AsFile(object)
 
-
+#this isn't strictly necessary, but it makes the rest of the code
+#a lot cleaner to read.
 ctypedef int (*RSACallback)(
     int, unsigned char *, unsigned char * ,ossl_typ.RSA *, int
 )
@@ -19,6 +22,7 @@ ctypedef int (*RSACallback)(
 
 #the real magic happens here
 cdef object _process(object source, RSACallback func, ossl_typ.RSA* key):
+    """process the source using the provided callback method and rsa key"""
     if not isinstance(source, str):
         raise TypeError("only string data is supported")
     dest = str()
@@ -52,6 +56,7 @@ cdef object _process(object source, RSACallback func, ossl_typ.RSA* key):
 
 
 cdef class PublicKey:
+    """Encrypt text or decrypt data using RSA public key"""
     cdef ossl_typ.RSA *_rsa
 
     def __cinit__(self):
@@ -93,14 +98,14 @@ cdef class PublicKey:
         #release the evp structure
         evp.EVP_PKEY_free(evpk)
 
-    def encrypt(self, source): #protect the memory
+    def encrypt(self, source):
         """encrypt(source) -> string
 
            encrypt text with the rsa public key.
         """
         return _process(source, <RSACallback>rsa.RSA_public_encrypt, self._rsa)
 
-    def decrypt(self, source): #protect the memory
+    def decrypt(self, source):
         """decrypt(source) -> string
 
            decrypt data with the rsa public key.
@@ -109,6 +114,7 @@ cdef class PublicKey:
 
 
 cdef class PrivateKey:
+    """Encrypt text or decrypt data using RSA private key"""
     cdef ossl_typ.RSA *_rsa
 
     def __cinit__(self):
