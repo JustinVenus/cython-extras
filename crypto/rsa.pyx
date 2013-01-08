@@ -119,9 +119,12 @@ cdef object _process(object source, RSACallback func, RSA* key, bint enc):
                 raise ValueError("Operation failed due to invalid input")
         # Cython doesn't make the unsigned char* to object syntax very clear
             tmp = <unsigned char*><char*>dest_buf
-            read_len = read_len < i and i or read_len
-            actual += read_len
-            dest += tmp[:read_len]
+            if enc:
+                actual += i
+                dest += tmp[:bool(read_len < i) and i or read_len]
+            else:
+                actual += read_len
+                dest += tmp[:i]
             source = source[read_len:]
 
         return dest[0:actual]
