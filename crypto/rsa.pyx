@@ -1,27 +1,88 @@
 from libc.stdlib cimport malloc, free
 from libc.stdio cimport FILE, const_char
-cimport ossl_typ
-cimport rsa
-cimport evp
-cimport pem
-cimport err
 
 __doc__ = """RSA Public/Private key encryption/decryption routines"""
 
 __author__ = "Justin Venus <justin.venus@gmail.com>"
 
+###############################################################################
+# Start Header definitions
+###############################################################################
+
 cdef extern from "fileobject.h": 
     cdef FILE* PyFile_AsFile(object)
+
+cdef extern from "openssl/ossl_typ.h":
+    ctypedef struct EVP_PKEY:
+        pass
+    ctypedef struct RSA:
+        pass
+
+cdef extern from "openssl/rsa.h":
+    #work around for needing const
+    ctypedef unsigned char* const_unsigned_char_ptr "const unsigned char*"
+    ctypedef RSA* const_RSA_ptr "const RSA *"
+
+    enum: RSA_PKCS1_PADDING
+
+    int RSA_public_encrypt(
+        int flen, const_unsigned_char_ptr frm, 
+        unsigned char *to, RSA *rsa,int padding
+    )
+
+    int RSA_private_encrypt(
+        int flen, const_unsigned_char_ptr frm,
+        unsigned char *to, RSA *rsa,int padding
+    )
+
+    int RSA_public_decrypt(
+        int flen, const_unsigned_char_ptr frm,
+        unsigned char *to, RSA *rsa,int padding
+    )
+    int RSA_private_decrypt(
+        int flen, const_unsigned_char_ptr frm,
+        unsigned char *to, RSA *rsa,int padding
+    )
+
+    RSA* RSA_new()
+    int RSA_up_ref(RSA *r)
+    void RSA_free (RSA *r)
+    int RSA_size(const_RSA_ptr)
+
+cdef extern from "openssl/evp.h":
+    RSA* EVP_PKEY_get1_RSA(EVP_PKEY *pkey)
+    void EVP_PKEY_free(EVP_PKEY *pkey)
+
+cdef extern from "openssl/err.h":
+    unsigned long ERR_peek_error()
+    void ERR_clear_error()
+
+cdef extern from "openssl/pem.h":
+    #/* "userdata": new with OpenSSL 0.9.4 */
+    ctypedef int pem_password_cb(char *buf, int size, int rwflag, void *userdata)
+    RSA* PEM_read_RSAPrivateKey(
+        FILE *fp, RSA **x, pem_password_cb *cb, void *u
+    )
+    EVP_PKEY* PEM_read_PUBKEY(
+        FILE *fp, EVP_PKEY **x, pem_password_cb *cb, void *u
+    )
+###############################################################################
+# End Header definitions
+###############################################################################
 
 #this isn't strictly necessary, but it makes the rest of the code
 #a lot cleaner to read.
 ctypedef int (*RSACallback)(
-    int, unsigned char *, unsigned char * ,ossl_typ.RSA *, int
+    int, unsigned char *, unsigned char * ,RSA *, int
 )
+
+###############################################################################
+# Implementation Follows
+###############################################################################
 
 
 #the real magic happens here
-cdef object _process(object source, RSACallback func, ossl_typ.RSA* key):
+cdef object _process(object source, RSACallback func, RSA* key):
     """process the source using the provided callback method and rsa key"""
     if not isinstance(source, str):
         raise TypeError("only string data is supported")
@@ -29,7 +90,7 @@ cdef object _process(object source, RSACallback func, ossl_typ.RSA* key):
     cdef int read_len
     cdef int i
 
-    cdef int dest_buf_size = rsa.RSA_size(key)
+    cdef int dest_buf_size = RSA_size(key)
     cdef unsigned char *dest_buf 
     dest_buf = <unsigned char*>malloc( dest_buf_size )
 
@@ -41,10 +102,10 @@ cdef object _process(object source, RSACallback func, ossl_typ.RSA* key):
             read_len = min(len(source), dest_buf_size)
             i = func(
                 read_len, source, dest_buf,
-                key, rsa.RSA_PKCS1_PADDING
+                key, RSA_PKCS1_PADDING
             )
-            if i == -1 or err.ERR_peek_error():
-                err.ERR_clear_error()
+            if i == -1 or ERR_peek_error():
+                ERR_clear_error()
                 raise ValueError("Operation failed due to invalid input")
             tmp = <bytes>dest_buf
             dest += tmp[:i]
@@ -57,14 +118,14 @@ cdef object _process(object source, RSACallback func, ossl_typ.RSA* key):
 
 cdef class PublicKey:
     """Encrypt text or decrypt data using RSA public key"""
-    cdef ossl_typ.RSA *_rsa
+    cdef RSA *_rsa
 
     def __cinit__(self):
         self._rsa = NULL
 
     def __dealloc__(self):
         if self._rsa is not NULL:
-            rsa.RSA_free(self._rsa)
+            RSA_free(self._rsa)
 
     def __init__(self, path):
         """__init__(path)
@@ -77,52 +138,52 @@ cdef class PublicKey:
         if fp is NULL:
             raise MemoryError()
 
-        cdef ossl_typ.EVP_PKEY *evpk
-        evpk = pem.PEM_read_PUBKEY(fp, NULL, NULL, NULL)
+        cdef EVP_PKEY *evpk
+        evpk = PEM_read_PUBKEY(fp, NULL, NULL, NULL)
         x.close() #make sure we close the file
 
-        if err.ERR_peek_error() != 0 or evpk is NULL:
-            err.ERR_clear_error()
+        if ERR_peek_error() != 0 or evpk is NULL:
+            ERR_clear_error()
             if evpk is not NULL:
-                evp.EVP_PKEY_free(evpk)
+                EVP_PKEY_free(evpk)
             raise Exception("Failed to read RSA public key %s" % path)
 
-        self._rsa = evp.EVP_PKEY_get1_RSA(evpk)
-        if err.ERR_peek_error() != 0 or self._rsa is NULL:
-            err.ERR_clear_error()
-            evp.EVP_PKEY_free(evpk)
+        self._rsa = EVP_PKEY_get1_RSA(evpk)
+        if ERR_peek_error() != 0 or self._rsa is NULL:
+            ERR_clear_error()
+            EVP_PKEY_free(evpk)
             raise Exception("Failed to extract RSA key from the EVP_PKEY at %s" % path) 
 
         #increment the internal rsa struct reference
-        rsa.RSA_up_ref(self._rsa)
+        RSA_up_ref(self._rsa)
         #release the evp structure
-        evp.EVP_PKEY_free(evpk)
+        EVP_PKEY_free(evpk)
 
     def encrypt(self, source):
         """encrypt(source) -> string
 
            encrypt text with the rsa public key.
         """
-        return _process(source, <RSACallback>rsa.RSA_public_encrypt, self._rsa)
+        return _process(source, <RSACallback>RSA_public_encrypt, self._rsa)
 
     def decrypt(self, source):
         """decrypt(source) -> string
 
            decrypt data with the rsa public key.
         """
-        return _process(source, <RSACallback>rsa.RSA_public_decrypt, self._rsa)
+        return _process(source, <RSACallback>RSA_public_decrypt, self._rsa)
 
 
 cdef class PrivateKey:
     """Encrypt text or decrypt data using RSA private key"""
-    cdef ossl_typ.RSA *_rsa
+    cdef RSA *_rsa
 
     def __cinit__(self):
         self._rsa = NULL
 
     def __dealloc__(self):
         if self._rsa is not NULL:
-            rsa.RSA_free(self._rsa)
+            RSA_free(self._rsa)
 
     def __init__(self, path):
         """__init__(path)
@@ -135,12 +196,12 @@ cdef class PrivateKey:
         if fp is NULL:
             raise MemoryError()
 
-        self._rsa = pem.PEM_read_RSAPrivateKey(fp, NULL, NULL, NULL)
+        self._rsa = PEM_read_RSAPrivateKey(fp, NULL, NULL, NULL)
         x.close() #make sure we close the file
 
         #check for library errors before null pointers
-        if err.ERR_peek_error() != 0:
-            err.ERR_clear_error()
+        if ERR_peek_error() != 0:
+            ERR_clear_error()
             raise Exception("Failed to read RSA private key %s" % path)
 
         if self._rsa is NULL:
@@ -151,14 +212,14 @@ cdef class PrivateKey:
 
            encrypt text with the rsa private key.
         """
-        return _process(source, <RSACallback>rsa.RSA_private_encrypt, self._rsa)
+        return _process(source, <RSACallback>RSA_private_encrypt, self._rsa)
 
     def decrypt(self, source):
         """decrypt(source) -> string
 
            decrypt data with the rsa private key.
         """
-        return _process(source, <RSACallback>rsa.RSA_private_decrypt, self._rsa)
+        return _process(source, <RSACallback>RSA_private_decrypt, self._rsa)
 
 
 __all__ = ['PrivateKey', 'PublicKey']
