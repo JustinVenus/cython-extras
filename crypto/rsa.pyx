@@ -27,24 +27,23 @@ cdef extern from "openssl/rsa.h":
 
     int RSA_public_encrypt(
         int flen, const_unsigned_char_ptr frm, 
-        unsigned char *to, RSA *rsa,int padding
+        unsigned char *to, const_RSA_ptr rsa,int padding
     )
 
     int RSA_private_encrypt(
         int flen, const_unsigned_char_ptr frm,
-        unsigned char *to, RSA *rsa,int padding
+        unsigned char *to, const_RSA_ptr rsa,int padding
     )
 
     int RSA_public_decrypt(
         int flen, const_unsigned_char_ptr frm,
-        unsigned char *to, RSA *rsa,int padding
+        unsigned char *to, const_RSA_ptr rsa,int padding
     )
     int RSA_private_decrypt(
         int flen, const_unsigned_char_ptr frm,
-        unsigned char *to, RSA *rsa,int padding
+        unsigned char *to, const_RSA_ptr rsa,int padding
     )
 
-    RSA* RSA_new()
     int RSA_up_ref(RSA *r)
     void RSA_free (RSA *r)
     int RSA_size(const_RSA_ptr)
@@ -73,14 +72,15 @@ cdef extern from "openssl/pem.h":
 #this isn't strictly necessary, but it makes the rest of the code
 #a lot cleaner to read.
 ctypedef int (*RSACallback)(
-    int, unsigned char *, unsigned char * ,RSA *, int
+    int, unsigned char *, unsigned char *, const_RSA_ptr, int
 )
 
 ###############################################################################
 # Implementation Follows
 ###############################################################################
 
-cdef object _process(object source, RSACallback func, RSA* key, bint enc):
+cdef object _process(
+        object source, RSACallback func, const_RSA_ptr key, bint encrypt):
     """process the source using the provided callback method and rsa key"""
     if not isinstance(source, str):
         raise TypeError("only string data is supported")
@@ -90,9 +90,14 @@ cdef object _process(object source, RSACallback func, RSA* key, bint enc):
     cdef int i
 
     cdef int dest_buf_size = RSA_size(key)
+    # flen must be less than RSA_size(rsa) - 11 for the PKCS #1 v1.5 based
+    # padding mode.  This caused the encrypt failures on long messages.
+    #
+    # see http://www.openssl.org/docs/crypto/RSA_public_encrypt.html
+    # see http://www.openssl.org/docs/crypto/RSA_private_encrypt.html
     cdef int reserved = dest_buf_size - 11
     cdef unsigned char *dest_buf 
-    dest_buf = <unsigned char*>malloc( dest_buf_size )
+    dest_buf = <unsigned char*>malloc(dest_buf_size)
 
     # make sure this doesn't find it's way into the try/block below
     if dest_buf is NULL:
@@ -101,17 +106,12 @@ cdef object _process(object source, RSACallback func, RSA* key, bint enc):
     try:
         while source:
             read_len = min(len(source), dest_buf_size)
-        # flen must be less than RSA_size(rsa) - 11 for the PKCS #1 v1.5 based
-        # padding mode.  This caused the encrypt failures on long messages.
-        #
-        # see http://www.openssl.org/docs/crypto/RSA_public_encrypt.html
-        # see http://www.openssl.org/docs/crypto/RSA_private_encrypt.html
-            if enc and bool(read_len > reserved):
+            if encrypt and bool(read_len > reserved):
                 read_len = reserved
             #blindly call our C callback function
             i = func(
                 read_len, <unsigned char*><char*>source,
-                dest_buf, key, RSA_PKCS1_PADDING
+                dest_buf, <RSA *>key, RSA_PKCS1_PADDING
             )
 
             if i == -1 or ERR_peek_error():
@@ -119,17 +119,16 @@ cdef object _process(object source, RSACallback func, RSA* key, bint enc):
                 raise ValueError("Operation failed due to invalid input")
         # Cython doesn't make the unsigned char* to object syntax very clear
             tmp = <unsigned char*><char*>dest_buf
-            if enc:
+            if encrypt:
                 actual += i
                 dest += tmp[:bool(read_len < i) and i or read_len]
             else:
                 actual += read_len
                 dest += tmp[:i]
             source = source[read_len:]
-
         return dest[0:actual]
     finally:
-        free( dest_buf )
+        free(dest_buf)
 
 ###############################################################################
 # Python class definitions follow
@@ -191,7 +190,8 @@ cdef class PublicKey:
            encrypt text with the rsa public key.
         """
         return _process(
-            text, <RSACallback>RSA_public_encrypt, self._rsa, True)
+            text, <RSACallback>RSA_public_encrypt,
+            <const_RSA_ptr>self._rsa, True)
 
     def decrypt(self, data):
         """decrypt(data) -> text
@@ -199,7 +199,8 @@ cdef class PublicKey:
            decrypt data with the rsa public key.
         """
         return _process(
-            data, <RSACallback>RSA_public_decrypt, self._rsa, False)
+            data, <RSACallback>RSA_public_decrypt,
+            <const_RSA_ptr>self._rsa, False)
 
 
 cdef class PrivateKey:
@@ -246,7 +247,8 @@ cdef class PrivateKey:
            encrypt text with the rsa private key.
         """
         return _process(
-            text, <RSACallback>RSA_private_encrypt, self._rsa, True)
+            text, <RSACallback>RSA_private_encrypt,
+            <const_RSA_ptr>self._rsa, True)
 
     def decrypt(self, data):
         """decrypt(data) -> text
@@ -254,6 +256,7 @@ cdef class PrivateKey:
            decrypt data with the rsa private key.
         """
         return _process(
-            data, <RSACallback>RSA_private_decrypt, self._rsa, False)
+            data, <RSACallback>RSA_private_decrypt,
+            <const_RSA_ptr>self._rsa, False)
 
 __all__ = ['PrivateKey', 'PublicKey']
